@@ -1,0 +1,294 @@
+use std::{
+    collections::{
+        hash_set::HashSet,
+        VecDeque,
+    },
+    fmt::{Debug, Display}
+};
+use rand::seq::IteratorRandom;
+
+
+/// Tilemap is a map of indicies, used as input/output for WFC
+type Tilemap = Map<i32>;
+/// Wavemap is a Map containing domains used during the WFC algorithm
+type Wavemap = Map<HashSet<i32>>;
+
+/// The valid directions to compare cells in WFC 
+enum Direction { 
+    Up = 0,
+    Down,
+    Left,
+    Right,
+}
+
+/// The defined rules for every possible tile in a `Wavemap`.
+///
+/// Constraints can be derived from a sample `Tilemap` using `into()/from()`.
+/// Constraints for a tile can be accessed using `get_constraints()` 
+#[derive(Debug)]
+struct Constraints(Vec<[HashSet<i32>; 4]>);         
+impl Constraints {
+    /// Return the set of constraints in a `direction` for a specified `tile`.
+    fn get_constraints(&self, tile: i32, direction: usize) -> &HashSet<i32> {
+        &self.0[tile as usize][direction as usize]
+    }
+}
+// Implement pretty printing for Constraints
+impl Display for Constraints {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Iterate over each tile and direction, outputting their ruleset
+        let mut output = String::new();
+        for (i, _) in self.0.iter().enumerate() {
+            output.push_str(&format!("Tile: {}\n------\n", i)[..]);
+            
+            for j in 0..4 {
+                let valid_tiles = &self.0[i][j];
+                output.push_str(&format!("Dir: {} | ", j)[..]);
+                for tile in valid_tiles {
+                    output.push_str(&format!("{} ", *tile)[..]);
+                }
+                output.push_str("\n");
+            }
+            if i < self.0.len()-1 {
+                output.push_str("\n");
+            }
+        }
+        write!(f, "{}", output)
+    }
+}
+// Implement From<Tilemap> to allow to building Constraints from a sample map
+impl From<Tilemap> for Constraints {
+    fn from(sample: Tilemap) -> Self {
+        let max_cell = *(sample.data.iter().max().unwrap());
+        let mut constraints = Constraints(Vec::with_capacity(max_cell as usize));
+        let constraint_data = &mut constraints.0;
+        
+        // Foreach tile up to `max_cell`, push an array of empty domains
+        for _ in 0..max_cell+1 {
+            constraint_data.push([HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new()]);
+        }
+        
+        // Iterate over each cell in the sample
+        for (i, cell) in sample.data.iter().enumerate() {
+            // Iterate over all neighbour Options
+            for (dir, nbr_id) in sample.neighbour_list[i].iter().enumerate() {
+                // Filter None values
+                if let Some(nbr_id) = nbr_id {
+                    // Insert the neighbours value into the relevant constraint set
+                    constraint_data[*cell as usize][dir].insert(sample.data[*nbr_id]);
+                }
+            }
+        }
+    
+        // Return the populated constraints
+        constraints
+    }
+}
+
+/// A simple 2D vector
+#[derive(Copy, Clone, Debug)]
+struct Vec2 {
+    x: i32,
+    y: i32,
+}
+impl Vec2 {
+    fn new(x: i32, y: i32) -> Self {
+        Self { x, y } 
+    }
+}
+
+
+#[derive(Debug)]
+struct Map<T> {
+    size: Vec2,
+    data: Vec<T>,
+    /// Neighbour list provides a lookup for neighbour indicies.
+    // This could also be a Vec of tuples to avoid existence checks (not sure if faster)
+    neighbour_list: Vec<[Option<usize>; 4]>,
+}
+impl<T> Map<T> {
+
+    /// Allocates space for a new Map
+    /// Neighbours are initialized on creation, data can optionally be initialized through `init_val`
+    pub fn new(size: Vec2, init_val: Option<T>) -> Self 
+    where T: Clone {
+
+        if size.x < 0 || size.y < 0 {
+            panic!("Tried to create a negative sized map.");
+        }
+
+        let total_size: usize = (size.x * size.y) as usize;
+        let mut data: Vec<T> = Vec::with_capacity(total_size); 
+        let mut neighbour_list = Vec::with_capacity(total_size);
+        
+        let val = init_val.clone();
+        // Populate the neighbour_list and potentially the data (if init_val is set)
+        for i in 0..total_size {
+            // Convert i into an i32 for Point calculations
+            let i_int: i32 = i.try_into().expect("Map total size should not exceed max i32");
+            
+            if init_val.is_some() {
+                data.push(val.clone().unwrap());
+            }
+
+            let position = Vec2::new( i_int % size.x, i_int / size.x );
+            let mut neighbours = [None; 4];
+            
+            // Left
+            if position.x > 0 {
+                neighbours[Direction::Left as usize] = Some(i-1);    
+            }
+            // Right
+            if position.x < size.x-1 {
+                neighbours[Direction::Right as usize] = Some(i+1);
+            }
+            // Up
+            if position.y > 0 {
+                neighbours[Direction::Up as usize] = Some(i-size.x as usize);
+            }
+            // Down
+            if position.y < size.y-1 {
+                neighbours[Direction::Down as usize] = Some(i+size.x as usize);
+            }
+
+            neighbour_list.push(neighbours);
+        }
+
+        Self { size, data, neighbour_list } 
+    }
+}
+// Implement Display for pretty printing of maps
+impl<T> Display for Map<T> where T: std::fmt::Debug {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut output = String::new();
+        for (i, cell) in self.data.iter().enumerate() {
+            if i % self.size.x as usize == 0 {
+                output.push_str("\n");
+            }
+            output.push_str(&format!("{:?} ", *cell)[..]); 
+        }
+        write!(f, "{}", output)
+    }
+}
+// Implement helpers for wave function collapse maps
+impl Wavemap {
+
+    /// Finds the lowest entropy cell and collapses domain into a single choice
+    pub fn collapse_lowest(&mut self) -> usize{
+        let cell_choice = self.least_entropy();
+
+        // Extract all options in domain
+        let domain = self.data[cell_choice].drain();
+        
+        // Grab a random one and add it back
+        let mut rng = rand::thread_rng();
+        let final_choice = domain.choose(&mut rng).unwrap();
+        self.data[cell_choice].insert(final_choice);
+
+        // Return with cell was chosen
+        return cell_choice;
+    }
+
+    /// Scans the Wavemap for the lowest entropy cells and chooses a random one from the list
+    /// Panics on empty Wavemap.
+    pub fn least_entropy(&self) -> usize {
+        // Find the lowest length, non-1, domain by folding the domains into the minimum value
+        let lowest_entropy = self.data.iter()
+            .fold(usize::MAX, |acc, cell| {
+                if cell.len() == 0 { panic!("Illegal state. Aborting collapse."); }
+                else if cell.len() != 1 { cell.len().min(acc) }
+                else { acc }
+            });
+        // Note: if lowest_entropy is usize::MAX then the Wavemap was collapsed before calling
+        // TODO handle this case, which *if* used correctly would never arise.
+        
+        // Get every cell('s id) of the lowest entropy
+        let lowest_cells: Vec<usize> = self.data.iter().enumerate()
+            .filter(|(_, cell)| cell.len() == lowest_entropy)   // Filter by lowest entropy
+            .map(|(i, _)| i)                                    // Remap output to be the cell's id
+            .collect();                                         // Collect into a Vec
+        
+        // Grab a random choice from the lowest cells
+        let mut rng = rand::thread_rng();
+        return *lowest_cells.iter().choose(&mut rng).unwrap();
+    }
+
+    /// Propagates changes in constraints to the rest of the Wavemap
+    pub fn propagate(&mut self, root_id: usize, constraints: &Constraints) {
+        // Store all pending constraint checks into a queue
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        queue.push_back(root_id);
+        
+        while queue.len() > 0 {
+            let cell_id = queue.pop_front().unwrap(); // Cell will always exist, as queue.len > 0
+            let cell_domain = self.data[cell_id].clone();
+
+            // Check each valid cell neighbour for changed constraints
+            for (dir, nbr_id) in self.neighbour_list[cell_id].iter().enumerate() {
+                if let Some(nbr_id) = nbr_id {
+                    let mut constrained: HashSet<i32> = HashSet::new();
+                    
+                    for tile in cell_domain.iter() {
+                        let rules = constraints.get_constraints(*tile, dir);
+                        for rule in rules {
+                            constrained.insert(*rule);
+                        }
+                    }
+
+                    let intersection: Vec<i32> = constrained
+                        .intersection(&self.data[*nbr_id])
+                        .map(|x| *x)
+                        .collect();
+
+                    if intersection.len() < self.data[*nbr_id].len() {
+                        queue.push_back(*nbr_id);
+                        self.data[*nbr_id] = HashSet::from_iter(intersection.into_iter());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Scans wavemap for an uncollapsed cell. Returns true if at least one cell isn't collapsed
+    pub fn is_collapsed(&self) -> bool {
+        for cell in self.data.iter() {
+            if cell.len() > 1 {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+fn main() {
+    let mut sample = Map::new(Vec2::new(7,4), None);
+    sample.data = vec![ 1, 1, 1, 1, 1, 1, 1,
+                        1, 0, 0, 1, 2, 2, 1,
+                        1, 0, 0, 1, 2, 2, 1,
+                        1, 1, 1, 1, 1, 1, 1,];
+    // Create a set of possible cells, based on the sample.
+    let valid_cells: HashSet<i32> = HashSet::from_iter(sample.data.clone());
+
+    // Build a wavemap of the desired output size, initialize all cells to the valid_cells set
+    let output_size = Vec2::new(30, 30);
+    let mut domains: Wavemap = Map::new(output_size, Some(valid_cells));
+    
+    println!("Building constraints from: {}\n", sample);
+    let constraints = Constraints::from(sample);
+    println!("Resulting rulest:\n {}", constraints);
+
+    while !domains.is_collapsed() {
+        let collapsed = domains.collapse_lowest();
+        domains.propagate(collapsed, &constraints);
+    }
+    
+    const TILESET: [char; 3] = [' ', '~', '#'];
+    for (i, domain) in domains.data.iter().enumerate() {
+        if i % domains.size.x as usize == 0 {
+            println!("");
+        }
+        
+        print!("{} ", TILESET[*domain.iter().next().unwrap() as usize]);
+    }
+}
