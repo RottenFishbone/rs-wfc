@@ -2,8 +2,13 @@
 name = "wfc"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+build = "build.rs"
 
 [dependencies]
 rand = "*"
+
+clap = { version = "4.0", features = ["derive"] }
+
+rustacuda = "0.1"
+rustacuda_core = "0.1"
+rustacuda_derive = "0.1"
