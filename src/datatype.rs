@@ -91,3 +91,6 @@ impl<T> std::fmt::Display for Map<T> where T: std::fmt::Debug {
         write!(f, "{}", output)
     }
 }
+
+/// Tilemap is a map of indicies, used as input/output for WFC
+pub type Tilemap = Map<i32>;

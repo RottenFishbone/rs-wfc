@@ -1,4 +1,4 @@
-use crate::datatype::{Vec2, Map};
+use crate::datatype::{Vec2, Map, Tilemap};
 
 use std::{
     collections::{
@@ -9,18 +9,16 @@ use std::{
 };
 use rand::seq::IteratorRandom;
 
-
-/// Tilemap is a map of indicies, used as input/output for WFC
-pub type Tilemap = Map<i32>;
-/// Wavemap is a Map containing domains used during the WFC algorithm
-pub type Wavemap = Map<HashSet<i32>>;
+pub fn collapse_from_sample(sample: &Map<i32>, output_size: Vec2) -> Tilemap {
+    Ac3Wavemap::collapse_from_sample(sample, output_size)
+}
 
 /// The defined rules for every possible tile in a `Wavemap`.
 ///
 /// Constraints can be derived from a sample `Tilemap` using `into()/from()`.
 /// Constraints for a tile can be accessed using `get_constraints()` 
 #[derive(Debug)]
-pub struct Constraints(Vec<[HashSet<i32>; 4]>);         
+struct Constraints(Vec<[HashSet<i32>; 4]>);         
 impl Constraints {
     /// Return the set of constraints in a `direction` for a specified `tile`.
     fn get_constraints(&self, tile: i32, direction: usize) -> &HashSet<i32> {
@@ -79,9 +77,22 @@ impl From<&Tilemap> for Constraints {
     }
 }
 
+/// Wavemap is a Map containing domains used during the WFC algorithm
+struct Ac3Wavemap(Map<HashSet<i32>>);
+impl From<Ac3Wavemap> for Map<i32> {
+    fn from(wavemap: Ac3Wavemap) -> Self {
+        let mut map = Self::new(wavemap.0.size, None);
+        for cell in wavemap.0.data.iter() {
+            let cell_val = *cell.iter().next().unwrap();
+            map.data.push(cell_val);
+        }
+        
+        map
+    }
+}
 // Implement helpers for wave function collapse maps
-impl Wavemap {
-    pub fn collapse_from_sample(sample: &Map<i32>, output_size: Vec2) -> Self {
+impl Ac3Wavemap {
+    pub fn collapse_from_sample(sample: &Map<i32>, output_size: Vec2) -> Tilemap {
         // Create a set of constraints using the sample
         let constraints = Constraints::from(sample);
         
@@ -89,27 +100,27 @@ impl Wavemap {
         let domain: HashSet<i32> = HashSet::from_iter(sample.data.clone());
 
         // Create a wavemap with each variable holding the full domain
-        let mut domains: Wavemap = Map::new(output_size, Some(domain));
+        let mut domains = Ac3Wavemap(Map::new(output_size, Some(domain)));
 
         while !domains.is_collapsed() {
             let collapsed = domains.collapse_lowest();
             domains.propagate(collapsed, &constraints);
         }
 
-        domains
+        domains.into()
     }
 
     /// Finds the lowest entropy cell and collapses domain into a single choice
     pub fn collapse_lowest(&mut self) -> usize{
         let cell_choice = self.least_entropy();
-
+        let map = &mut self.0;
         // Extract all options in domain
-        let domain = self.data[cell_choice].drain();
+        let domain = map.data[cell_choice].drain();
         
         // Grab a random one and add it back
         let mut rng = rand::thread_rng();
         let final_choice = domain.choose(&mut rng).unwrap();
-        self.data[cell_choice].insert(final_choice);
+        map.data[cell_choice].insert(final_choice);
 
         // Return with cell was chosen
         return cell_choice;
@@ -118,8 +129,9 @@ impl Wavemap {
     /// Scans the Wavemap for the lowest entropy cells and chooses a random one from the list
     /// Panics on empty Wavemap.
     pub fn least_entropy(&self) -> usize {
+        let map = &self.0;
         // Find the lowest length, non-1, domain by folding the domains into the minimum value
-        let lowest_entropy = self.data.iter()
+        let lowest_entropy = map.data.iter()
             .fold(usize::MAX, |acc, cell| {
                 if cell.len() == 0 { panic!("Illegal state. Aborting collapse."); }
                 else if cell.len() != 1 { cell.len().min(acc) }
@@ -129,7 +141,7 @@ impl Wavemap {
         // TODO handle this case, which *if* used correctly would never arise.
         
         // Get every cell('s id) of the lowest entropy
-        let lowest_cells: Vec<usize> = self.data.iter().enumerate()
+        let lowest_cells: Vec<usize> = map.data.iter().enumerate()
             .filter(|(_, cell)| cell.len() == lowest_entropy)   // Filter by lowest entropy
             .map(|(i, _)| i)                                    // Remap output to be the cell's id
             .collect();                                         // Collect into a Vec
@@ -141,16 +153,17 @@ impl Wavemap {
 
     /// Propagates changes in constraints to the rest of the Wavemap
     pub fn propagate(&mut self, root_id: usize, constraints: &Constraints) {
+        let map = &mut self.0;
         // Store all pending constraint checks into a queue
         let mut queue: VecDeque<usize> = VecDeque::new();
         queue.push_back(root_id);
         
         while queue.len() > 0 {
             let cell_id = queue.pop_front().unwrap(); // Cell will always exist, as queue.len > 0
-            let cell_domain = self.data[cell_id].clone();
+            let cell_domain = map.data[cell_id].clone();
 
             // Check each valid cell neighbour for changed constraints
-            for (dir, nbr_id) in self.neighbour_list[cell_id].iter().enumerate() {
+            for (dir, nbr_id) in map.neighbour_list[cell_id].iter().enumerate() {
                 if let Some(nbr_id) = nbr_id {
                     let mut constrained: HashSet<i32> = HashSet::new();
                     
@@ -162,13 +175,13 @@ impl Wavemap {
                     }
 
                     let intersection: Vec<i32> = constrained
-                        .intersection(&self.data[*nbr_id])
+                        .intersection(&map.data[*nbr_id])
                         .map(|x| *x)
                         .collect();
 
-                    if intersection.len() < self.data[*nbr_id].len() {
+                    if intersection.len() < map.data[*nbr_id].len() {
                         queue.push_back(*nbr_id);
-                        self.data[*nbr_id] = HashSet::from_iter(intersection.into_iter());
+                        map.data[*nbr_id] = HashSet::from_iter(intersection.into_iter());
                     }
                 }
             }
@@ -177,7 +190,7 @@ impl Wavemap {
 
     /// Scans wavemap for an uncollapsed cell. Returns true if at least one cell isn't collapsed
     pub fn is_collapsed(&self) -> bool {
-        for cell in self.data.iter() {
+        for cell in self.0.data.iter() {
             if cell.len() > 1 {
                 return false;
             }

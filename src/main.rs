@@ -1,10 +1,15 @@
+#[macro_use]
+extern crate rustacuda;
+
 mod ac3;
+mod ac3cuda;
+
 mod datatype;
 
 use std::fmt::Display;
 
-use datatype::{Vec2, Map};
-use ac3::Wavemap;
+use datatype::{Vec2, Map, Tilemap};
+
 use clap::{Parser, ValueEnum};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, PartialOrd, Ord, ValueEnum)]
@@ -70,17 +75,21 @@ fn main() {
             return;
         }
     };
+    
 
-    let output = Wavemap::collapse_from_sample(&sample, output_size);
+    let output: Tilemap = match args.mode {
+        Mode::Ac3 => ac3::collapse_from_sample(&sample, output_size),
+        Mode::Ac3Cuda => ac3cuda::collapse_from_sample(&sample, output_size),
+    };
     
     // TODO use sample datastructure to rebuild character representation
     // Map output to character set for a graphical printing
     const TILESET: [char; 3] = [' ', '~', '#'];
-    for (i, domain) in output.data.iter().enumerate() {
+    for (i, cell) in output.data.iter().enumerate() {
         if i % output.size.x as usize == 0 {
             println!("");
         }
         
-        print!("{} ", TILESET[*domain.iter().next().unwrap() as usize]);
+        print!("{} ", TILESET[*cell as usize]);
     }
 }
