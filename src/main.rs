@@ -81,7 +81,7 @@ fn main() {
         Mode::Ac3 => ac3::collapse_from_sample(&sample, output_size),
         Mode::Ac3Cuda => ac3cuda::collapse_from_sample(&sample, output_size),
     };
-    
+    /*
     // TODO use sample datastructure to rebuild character representation
     // Map output to character set for a graphical printing
     const TILESET: [char; 3] = [' ', '~', '#'];
@@ -91,5 +91,5 @@ fn main() {
         }
         
         print!("{} ", TILESET[*cell as usize]);
-    }
+    }*/
 }

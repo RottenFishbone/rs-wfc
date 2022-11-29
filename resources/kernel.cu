@@ -108,21 +108,25 @@ void iterate_ac(int32_t *domains, int32_t *constraints,
 /**
   @brief Construct a vector of element id's where `counts[id] == searchVal`
 
-  @param counts The array of values to search
+  @param values The array of values to search
   @param searchVal The value to search for
+  @param length The # of elements in the values buffer
   @param results The buffer to store the found ids
-  @param counter The length of the vector
+  @param resCount The length of the vector
 */
 extern "C"
 __global__
-void collect_ids(uint32_t *counts, uint32_t searchVal, uint32_t length, 
+void collect_ids(uint32_t *values, uint32_t searchVal, uint32_t length, 
         uint32_t *results, uint32_t *resCount){
+    
+    uint32_t id = threadIdx.x + blockDim.x * blockIdx.x;
+    if (id < length && values[id] == searchVal){
+        results[atomicAdd(resCount, 1)] = id;
+    }
 
-    uint32_t i = threadIdx.x + blockDim.x * blockIdx.x;
-    if (i >= length || counts[i] != searchVal) { return; }
-    results[atomicAdd(resCount,1)] = i;
+    // TODO: implement block-wide memory caches and perform clone to global
+    // memory once per block
 }
-
 
 /**
   @brief Counts the length of each domain and outputs the result into a new buffer
@@ -144,8 +148,8 @@ void count_domains(int32_t *domains, uint32_t *results, uint32_t length){
 /**
   @brief Parallel reduction to find min/max values of the input array)
 
-  This performs the popular parallel reduction as explained by Nvidia engineer
-  Mark Harris
+  This performs a modified parallel reduction from the one explained by 
+  Nvidia engineer Mark Harris
     https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf
     
   The results are stored into a single integer, the least significant 16-bits
@@ -157,6 +161,8 @@ void count_domains(int32_t *domains, uint32_t *results, uint32_t length){
   a call with 2 blocks would output results into index 0 and 1 of `results`, these
   must be reduced as well. This is as a result of no inter-block synchronization,
   using the kernel launch as the block sync barrier.
+
+  Note, min will exclude values of 1 to allow for proper entropy selection in WFC
 
   @param values The array to find the min and max value of
   @param results The output results buffer
@@ -183,13 +189,15 @@ void reduce_bounds(uint32_t *values, uint32_t *results, uint32_t length, int fir
     uint32_t mask = firstReduction ? ~0 : 0xFFFF;
     uint32_t shift = firstReduction ? 0 : 16;
     // Init the bounds variables using the thread's globalId
-    uint32_t minVal = values[globalId] & mask;
-    uint32_t maxVal = values[globalId] >> 16;
+    uint32_t val = values[globalId];
+    uint32_t minVal = (val & mask) != 1 ? val & mask : 0xFFFF;
+    uint32_t maxVal = val >> shift;
     
     // Perform the first reduction in place to avoid having 50% idle threads
     if (globalId + blockDim.x < length) {
-        minVal = min(values[globalId+blockDim.x] & mask, minVal);
-        maxVal = max(values[globalId+blockDim.x] >> shift, maxVal);
+        val = values[globalId+blockDim.x];
+        minVal = min((val & mask) != 1 ? val & mask : 0xFFFF, minVal);
+        maxVal = max(val >> shift, maxVal);
     }
 
     // Store the encoded result into shared memory for usage within the block
