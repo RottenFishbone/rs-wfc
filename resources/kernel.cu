@@ -33,7 +33,7 @@ int findConstraints(int32_t *cell, int32_t *constraints, Direction dir) {
     // `i` is the amount to shift `*cell` to have bit0 be a set bit
     // By extension, `i` also represents the tile id we are concerned with
     // Note: __ffs is used to provide hardware level integer intrinsics
-    // and brings the count from worst case 30 wasted ops to 0 wasted ops
+    // and brings the count from worst case 31 asted ops to 0 wasted ops (per call)
     i = __ffs(*cell)-1;
     // `validDomain` is the domain the cell in direction `dir` is allowed to be
     validDomain = 0;
@@ -161,12 +161,11 @@ void count_domains(int32_t *domains, uint32_t *results, uint32_t length){
   @param values The array to find the min and max value of
   @param results The output results buffer
   @param length The number of elements in values
-  @param result The first value of results (to avoid larger gpu transfer)
+  @param firstReduction A flag to denote the values array are numbers, not bounds
 */
 extern "C"
 __global__
-void reduce_bounds(uint32_t *values, uint32_t *results, 
-        uint32_t length, uint32_t *result, int firstReduction){
+void reduce_bounds(uint32_t *values, uint32_t *results, uint32_t length, int firstReduction){
     extern __shared__ uint32_t s_results[];
 
     uint32_t i = threadIdx.x;
@@ -174,32 +173,32 @@ void reduce_bounds(uint32_t *values, uint32_t *results,
     if (globalId >= length) {
         if (i == 0){
             // Handle the case where the entire block is out of bounds
+            // by setting domain result to [0xFFFF, 0]
             results[blockIdx.x] = 0xFFFF;
-            *result = 0xFFFF;
         }
         return;
     }
     
-    // Used to determine if we are reducing a raw number or a previous iteration
+    // Used to determine if we are reducing a raw number or a previous iteration (value vs bound)
     uint32_t mask = firstReduction ? ~0 : 0xFFFF;
     uint32_t shift = firstReduction ? 0 : 16;
-    
+    // Init the bounds variables using the thread's globalId
     uint32_t minVal = values[globalId] & mask;
     uint32_t maxVal = values[globalId] >> 16;
     
-    // Perform the first reduction out of loop to avoid bounds checks
+    // Perform the first reduction in place to avoid having 50% idle threads
     if (globalId + blockDim.x < length) {
         minVal = min(values[globalId+blockDim.x] & mask, minVal);
         maxVal = max(values[globalId+blockDim.x] >> shift, maxVal);
     }
 
-    // Store initial state in shared memory, this will be half of threads in block
+    // Store the encoded result into shared memory for usage within the block
     s_results[i] = minVal | (maxVal<<16);
     __syncthreads();
 
     // Continually cut the stride in half, only allowing threads within
     // the stride to continue reduction. Eventually the block converges
-    // to a single thread.
+    // to a single thread performing a single min/max.
     for (uint32_t stride=blockDim.x/2; stride > 0; stride>>=1) {
         if (i < stride && i + stride < length) {
             minVal = min(s_results[i + stride]&(0xFFFF), minVal);
@@ -213,8 +212,5 @@ void reduce_bounds(uint32_t *values, uint32_t *results,
     // Each block writes into its corresponding index
     if (i == 0) {
         results[blockIdx.x] = minVal | (maxVal<<16);
-        // Also emit a single value, this is only useful on the last 
-        // kernel launch
-        *result = results[blockIdx.x];
     }
 }

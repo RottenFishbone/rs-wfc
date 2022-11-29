@@ -4,7 +4,7 @@
 use std::{ffi::CString, fmt::Display};
 
 use rustacuda::{prelude::*, error::CudaError};
-use rustacuda::memory::DeviceBox;
+use rustacuda::memory::{DeviceBox, UnifiedBox};
 use rustacuda_core::DevicePointer;
 use std::collections::HashSet;
 
@@ -132,7 +132,7 @@ impl CudaWavemap {
         // Calculate the upper and lower bounds of all domains
         let (min_cell, max_cell);
         unsafe {
-            (min_cell, max_cell) = CudaWavemap::parallel_bounds(
+            (min_cell, max_cell) = parallel_bounds(
                 size, &module, &stream, 
                 dev_buffers[0].as_device_ptr(),
                 dev_buffers[1].as_device_ptr()
@@ -140,7 +140,7 @@ impl CudaWavemap {
         }
 
         dev_buffers[1].copy_to(&mut output_map.data).unwrap();
-        println!("{}", output_map);
+        //println!("{}", output_map);
         println!("blocks: {}x{} threads.\nTotal threads: {}", 
             blocks_needed, block_size, block_size*blocks_needed);
         println!("Called: {} times", call_count);
@@ -148,12 +148,13 @@ impl CudaWavemap {
         println!("Domain Range: [{}, {}]", min_cell, max_cell);
         Tilemap::new(output_size, None)
     }
+}
 
-    unsafe fn parallel_collect_ids( value: u32, size: u32,
-        module: &Module, stream: &Stream,
-        input_buffer: DevicePointer<u32>,
-        results_buffer: &mut DeviceBuffer<u32>)
-        -> Result<Vec<u32>, CudaError> {
+unsafe fn parallel_collect_ids( value: u32, size: u32,
+    module: &Module, stream: &Stream,
+    input_buffer: DevicePointer<u32>,
+    results_buffer: &mut DeviceBuffer<u32>)
+    -> Result<Vec<u32>, CudaError> {
 
         let block_size = 512;
         let blocks_needed = (size+block_size-1)/block_size;
@@ -169,57 +170,74 @@ impl CudaWavemap {
         let mut result_vec = Vec::new();
         result_slice_dev.copy_to(&mut result_vec)?;
         Ok(result_vec)
-    }
+}
 
-    unsafe fn parallel_bounds(size: u32,
-        module: &Module, stream: &Stream,
-        domain_buffer: DevicePointer<u32>,
-        counts_buffer: DevicePointer<u32>)
-        -> Result<(u32, u32), CudaError> {
+/**
+ * Peforms a parallel reduction on the GPU to calculate the lower and upper bound
+ * of the domain_buffer.
+ *
+ * The domain buffer is counted, the result being placed into counts_buffer and
+ * using that data a reduction can be performed to calculate bounds. The reduction
+ * buffers are discarded as only the final value is of use.
+ */
+unsafe fn parallel_bounds(size: u32,
+    module: &Module, stream: &Stream,
+    domain_buffer: DevicePointer<u32>,
+    counts_buffer: DevicePointer<u32>)
+    -> Result<(u32, u32), CudaError> {
 
         let block_size = 512;
-        let blocks_count = (size+block_size-1)/block_size;
-        let reduce_blocks = (blocks_count + 1) / 2;
+        // Block count is calculated as the number of block_size blocks to contain `size`
+        let mut block_count = (size+block_size-1)/block_size;
+        // Reduce blocks is half that number, as reduction's first iteration is 2*blocksize
+        let mut reduce_blocks = (block_count + 1) / 2;
 
-        let mut final_result = u32::MAX;
-
-        let mut final_val_dev = DeviceBox::new(&u32::MAX)?;
-        let mut reduce_buffer = 
-            DeviceBuffer::<u32>::uninitialized(reduce_blocks as usize)?;
-        
         // Count the bits set in each domain and store the result in counts_buffer
-        launch!(module.count_domains<<<blocks_count, block_size, 0, stream>>>
+        launch!(module.count_domains<<<block_count, block_size, 0, stream>>>
             (domain_buffer,counts_buffer,size))?;
         stream.synchronize()?;
         
+        // Allocate unified memory to place the result from each block into
+        let mut reduce_buffer0 = 
+            UnifiedBuffer::<u32>::uninitialized(reduce_blocks as usize)?;
+        let mut reduce_buffer1 = 
+            UnifiedBuffer::<u32>::uninitialized((block_count/2) as usize)?;
+
         // Perform a parallel reduction, each block will output its result into
         // reduce_buffer[blockIdx]
         launch!(module.reduce_bounds<<<reduce_blocks, block_size, 4*block_size, stream>>>
-            (counts_buffer, reduce_buffer.as_device_ptr(), size, 
-             final_val_dev.as_device_ptr(), 1))?;
+            (counts_buffer, reduce_buffer0.as_unified_ptr(), size, 1))?;
         stream.synchronize()?;
-        
-        let mut out_vec: Vec<u32> = Vec::with_capacity(reduce_blocks as usize);
-        out_vec.resize(reduce_blocks as usize, u32::MAX);
-        reduce_buffer.copy_to(&mut out_vec)?;
-        println!("{:?}", out_vec.iter().map(|x| (x&0xFFFF, x>>16)).collect::<Vec<(u32,u32)>>());
-        println!("reduce called with {} blocks of {} on size {}", reduce_blocks, block_size, size);
-        
-        // If needed, reduce blocks once more using a single block
-        if blocks_count > 1 {
-            let mut final_buffer = 
-                DeviceBuffer::<u32>::uninitialized((blocks_count/2) as usize)?;
 
-            launch!(module.reduce_bounds<<<1, block_size, 4*block_size, stream>>>
-                (reduce_buffer.as_device_ptr(), final_buffer.as_device_ptr(), 
-                 (blocks_count+1)/2, final_val_dev.as_device_ptr(), 0))?;
+
+        // Continue reduction as many times as needed until a launch with a single
+        // block is performed
+        let mut swap_buffers = false;
+        let mut last_block_launch = reduce_blocks;
+        while last_block_launch > 1 {
+            block_count = (reduce_blocks+block_size-1)/block_size;
+            reduce_blocks = (block_count+1) / 2;
+
+            // Handle swapping reduction between the two buffers
+            let buf0 = if swap_buffers { reduce_buffer1.as_unified_ptr() } else { reduce_buffer0.as_unified_ptr() };
+            let buf1 = if swap_buffers { reduce_buffer0.as_unified_ptr() } else { reduce_buffer1.as_unified_ptr() };
+            swap_buffers = !swap_buffers;
+
+            launch!(module.reduce_bounds<<<reduce_blocks, block_size, 4*block_size, stream>>>
+                (buf0, buf1, last_block_launch, 0))?;
             stream.synchronize()?;
+            
+            last_block_launch = reduce_blocks;
         }
         
-        final_val_dev.copy_to(&mut final_result)?;
-
+        let final_result = if swap_buffers {
+            reduce_buffer1.first().unwrap().clone()
+        } else {
+            reduce_buffer0.first().unwrap().clone()
+        };
+    
         Ok((final_result & 0xFFFF, final_result >> 16))
-    }
 }
+
 
 
