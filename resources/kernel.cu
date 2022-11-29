@@ -26,7 +26,8 @@ extern "C"
 __device__ 
 inline
 int findConstraints(int32_t *cell, int32_t *constraints, Direction dir) {
-    if (!(*cell)) { return; }
+    if (!(*cell)) { return 0; }
+
     int validDomain, offset, i;
     
     // `i` is the amount to shift `*cell` to have bit0 be a set bit
@@ -43,7 +44,7 @@ int findConstraints(int32_t *cell, int32_t *constraints, Direction dir) {
         validDomain |= constraints[i*NUM_DIRS + dir];
         
         // Find the distance to the next set bit
-        offset = __ffs((*cell) >> i+1);
+        offset = __ffs((*cell) >> (i+1));
         i += offset;
         
         // Repeat if there is a next set bit
@@ -134,32 +135,76 @@ extern "C"
 __global__
 void count_domains(int32_t *domains, uint32_t *results, uint32_t length){
     uint32_t i = threadIdx.x + blockDim.x * blockIdx.x;
-    if (i >= length) { return; } // Prevent OOB access
-    results[i] = __popc(domains[i]); // __popc provides hardware level bit counting
+    if (i < length) {
+        results[i] = __popc(domains[i]); // __popc provides hardware level bit counting
+    }
 }
 
+
+/**
+  @brief Parallel reduction to find min/max values of the input array)
+
+  This performs the popular parallel reduction as explained by Nvidia engineer
+  Mark Harris
+    https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf
+    
+  The results are stored into a single integer, the least significant 16-bits
+  representing the min, the others the max.
+  Results can be found by either bitmasking 0xFFFF for min or shifting 16 right
+  for max.
+
+  Output must be reduced again until they have been reduced on a single block. That is,
+  a call with 2 blocks would output results into index 0 and 1 of `results`, these
+  must be reduced as well. This is as a result of no inter-block synchronization,
+  using the kernel launch as the block sync barrier.
+
+  @param values The array to find the min and max value of
+  @param results The output results buffer
+  @param length The number of elements in values
+  @param result The first value of results (to avoid larger gpu transfer)
+*/
 extern "C"
 __global__
-void bit_count_min(uint32_t *counts, uint32_t *results, uint32_t length, uint32_t *result){
+void reduce_bounds(uint32_t *values, uint32_t *results, 
+        uint32_t length, uint32_t *result, int firstReduction){
     extern __shared__ uint32_t s_results[];
 
     uint32_t i = threadIdx.x;
-    uint32_t minVal = counts[i + blockIdx.x*blockDim.x];
+    uint32_t globalId = i + blockIdx.x * blockDim.x*2;
+    if (globalId >= length) {
+        if (i == 0){
+            // Handle the case where the entire block is out of bounds
+            results[blockIdx.x] = 0xFFFF;
+            *result = 0xFFFF;
+        }
+        return;
+    }
     
-    if (i + blockDim.x < length) {
-        minVal = min(counts[i+blockDim.x], minVal);
+    // Used to determine if we are reducing a raw number or a previous iteration
+    uint32_t mask = firstReduction ? ~0 : 0xFFFF;
+    uint32_t shift = firstReduction ? 0 : 16;
+    
+    uint32_t minVal = values[globalId] & mask;
+    uint32_t maxVal = values[globalId] >> 16;
+    
+    // Perform the first reduction out of loop to avoid bounds checks
+    if (globalId + blockDim.x < length) {
+        minVal = min(values[globalId+blockDim.x] & mask, minVal);
+        maxVal = max(values[globalId+blockDim.x] >> shift, maxVal);
     }
 
-    s_results[i] = minVal;
+    // Store initial state in shared memory, this will be half of threads in block
+    s_results[i] = minVal | (maxVal<<16);
     __syncthreads();
 
     // Continually cut the stride in half, only allowing threads within
     // the stride to continue reduction. Eventually the block converges
     // to a single thread.
-    for (uint32_t stride=blockDim.x/2; stride > 0; stride /= 2) {
-        if (i < stride) {
-            minVal = min(s_results[i + stride], minVal);
-            s_results[i] = minVal;
+    for (uint32_t stride=blockDim.x/2; stride > 0; stride>>=1) {
+        if (i < stride && i + stride < length) {
+            minVal = min(s_results[i + stride]&(0xFFFF), minVal);
+            maxVal = max(s_results[i + stride]>>16, maxVal);
+            s_results[i] = minVal | (maxVal<<16);
         }
         __syncthreads();
     }
@@ -167,9 +212,9 @@ void bit_count_min(uint32_t *counts, uint32_t *results, uint32_t length, uint32_
     // Write the result of the block into the global result
     // Each block writes into its corresponding index
     if (i == 0) {
-        results[blockIdx.x] = minVal;
+        results[blockIdx.x] = minVal | (maxVal<<16);
         // Also emit a single value, this is only useful on the last 
         // kernel launch
-        *result = minVal;
+        *result = results[blockIdx.x];
     }
 }
