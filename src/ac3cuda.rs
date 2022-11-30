@@ -2,6 +2,8 @@
 
 
 use std::{ffi::CString, fmt::Display};
+
+use rand::prelude::*;
 use rand::seq::SliceRandom;
 
 use rustacuda::{prelude::*, error::CudaError};
@@ -138,14 +140,13 @@ impl CudaWavemap {
             else if max_cell == 0 { panic!("Invalid state reached.. exiting."); }
 
             // Find all cells matching min_cell
-            let uncollapsed_ids;
+            let selected_cell;
             unsafe {
-                uncollapsed_ids = parallel_collect_ids(min_cell, size, 
+                selected_cell = parallel_random_match(min_cell, size, 
                     &module, &stream,
                     dev_buffers[1].as_device_ptr(),
                     &mut dev_buffers[2]).unwrap();
             }
-            let selected_cell = uncollapsed_ids.choose(&mut rng).unwrap().clone();
 
             //Collapse selected cell
             let mut selected_cell_container: Vec<i32> = vec![0];
@@ -188,11 +189,11 @@ impl CudaWavemap {
  * this will underperform compared to sequential implementations for large datasets
  * due to poor memory utilization (random access vs sequential).
  */
-unsafe fn parallel_collect_ids( value: i32, size: u32,
+unsafe fn parallel_random_match( value: i32, size: u32,
     module: &Module, stream: &Stream,
     input_buffer: DevicePointer<i32>,
     results_buffer: &mut DeviceBuffer<i32>)
-    -> Result<Vec<i32>, CudaError> {
+    -> Result<i32, CudaError> {
     
         let block_size = 512;
         let blocks_needed = (size+block_size-1)/block_size;
@@ -204,15 +205,11 @@ unsafe fn parallel_collect_ids( value: i32, size: u32,
              result_count.as_unified_ptr()))?;
         stream.synchronize()?;
         
-        // Allocate the amount of memory we need on the host
-        let mut result_vec = Vec::new();
-        result_vec.resize((*result_count) as usize, 0);
-        
-        // Copy only the exact amount of memory back to the host
-        let (result_slice_dev, _) = results_buffer.split_at((*result_count) as usize);
-        result_slice_dev.copy_to(&mut result_vec)?;
+        let rand_id = rand::thread_rng().gen_range(0..(*result_count as u32)) as usize;
+        let mut selected_value = [0];
+        results_buffer[rand_id..(rand_id+1)].copy_to(&mut selected_value[..])?;
 
-        Ok(result_vec)
+        Ok(selected_value[0])
 }
 
 /**

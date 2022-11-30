@@ -81,15 +81,16 @@ fn main() {
         Mode::Ac3 => ac3::collapse_from_sample(&sample, output_size),
         Mode::Ac3Cuda => ac3cuda::collapse_from_sample(&sample, output_size),
     };
-    /*
+    
     // TODO use sample datastructure to rebuild character representation
     // Map output to character set for a graphical printing
-    const TILESET: [char; 3] = [' ', '~', '#'];
+    /*const TILESET: [char; 5] = [' ', 'i', '|','#','.'];
     for (i, cell) in output.data.iter().enumerate() {
         if i % output.size.x as usize == 0 {
             println!("");
         }
         
-        print!("{} ", TILESET[*cell as usize]);
+        let id = *cell as usize;//((*cell) as f32).log2() as usize;
+        print!("{} ", TILESET[id]);
     }*/
 }
