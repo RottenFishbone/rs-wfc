@@ -8,6 +8,23 @@ typedef enum {
 
 
 /**
+  @brief Set the value of each element to the position of the first set bit
+
+  Used to convert a set of values to its represented integer value.
+
+  @param bitfields The set of bitfields to convert
+  @param length The number of elements
+*/
+extern "C"
+__global__
+void bitfield_to_id(uint32_t *bitfields, uint32_t length){
+    uint32_t id = threadIdx.x + blockDim.x * blockIdx.x;
+    if (id < length) {
+        bitfields[id] = __ffs(bitfields[id])-1;
+    }
+}
+
+/**
     @brief Calculate imposed constraints by a cell's current domain
 
     Determines the imposed constraints in a specified direction

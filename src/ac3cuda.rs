@@ -168,12 +168,19 @@ impl CudaWavemap {
             selected_cell_val = 1<<selected_cell_val;
             (dev_buffers[0])[cell_range].copy_from(&[selected_cell_val]).unwrap();
         }
+        
+        unsafe {
+            // Convert all the bitfields into their index value
+            parallel_convert_bitfields(size, &module, &stream, 
+                dev_buffers[0].as_device_ptr()).unwrap();
+        }
 
+        // Copy the final output back to the CPU
         dev_buffers[0].copy_to(&mut output_map.data).unwrap();
         //println!("{}", output_map);
         //println!("blocks: {}x{} threads.\nTotal threads: {}", 
         //    blocks_needed, block_size, block_size*blocks_needed);
-
+        
         output_map
     }
 }
@@ -287,5 +294,18 @@ unsafe fn parallel_bounds(size: u32,
         Ok((final_result & 0xFFFF, final_result >> 16))
 }
 
+unsafe fn parallel_convert_bitfields(size: u32, 
+    module: &Module, stream: &Stream,
+    buffer: DevicePointer<i32>)
+    -> Result<(), CudaError> {
+    
+    let block_size = 512;
+    let blocks_needed = (size+block_size-1)/block_size;
+
+    launch!(module.bitfield_to_id<<<blocks_needed, block_size, 0, stream>>>
+        (buffer, size))?;
+
+    Ok(())
+}
 
 
