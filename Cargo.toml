@@ -2,6 +2,7 @@
 name = "wfc"
 version = "0.1.0"
 edition = "2021"
+authors = ["Navras Kamal", "Jayden Dumouchel"]
 build = "build.rs"
 
 [dependencies]
@@ -12,3 +13,5 @@ clap = { version = "4.0", features = ["derive"] }
 rustacuda = "0.1"
 rustacuda_core = "0.1"
 rustacuda_derive = "0.1"
+
+unicode-segmentation = "1.9"

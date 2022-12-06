@@ -16,7 +16,31 @@ pub enum Direction {
     Down,
     Left,
     Right,
+    Invalid,
 }
+impl From<u32> for Direction {
+    fn from(i: u32) -> Self {
+        match i {
+            0 => Direction::Up,
+            1 => Direction::Down,
+            2 => Direction::Left,
+            3 => Direction::Right,
+            _ => Direction::Invalid
+        }
+    }
+}
+impl From<Direction> for String {
+    fn from(dir: Direction) -> Self {
+        match dir {
+            Direction::Up => "Up".into(),
+            Direction::Down => "Down".into(),
+            Direction::Left => "Left".into(),
+            Direction::Right => "Right".into(),
+            Direction::Invalid => "Invalid".into(),
+        }
+    }
+}
+
 
 #[derive(Debug)]
 pub struct Map<T> {

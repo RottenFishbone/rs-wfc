@@ -13,8 +13,6 @@ use std::collections::HashSet;
 
 use crate::datatype::{Vec2, Map, Tilemap};
 
-
-
 pub fn collapse_from_sample(sample: &Map<i32>, output_size: Vec2) -> Tilemap {
     CudaWavemap::collapse_from_sample(sample, output_size)
 }
@@ -30,7 +28,8 @@ impl Display for Constraints {
             
             for j in 0..4 {
                 let valid_tiles = &self.0[i][j];
-                output.push_str(&format!("Dir: {} | ", j)[..]);
+                let dir_str:String = crate::datatype::Direction::from(j as u32).into();
+                output.push_str(&format!("Dir: {} | ", dir_str.chars().next().unwrap())[..]);
                 output.push_str(&format!("{:#034b}", valid_tiles));
                 output.push_str("\n");
             }
@@ -58,7 +57,7 @@ impl From<&Tilemap> for Constraints {
                 }
             }
         }
-
+        println!("{}", constraints);
         constraints
     }
 }
@@ -86,8 +85,11 @@ impl CudaWavemap {
             unsafe {DeviceBuffer::uninitialized(constraints.len()).unwrap()};
         constraints_dev.copy_from(&constraints[..]).unwrap();
         
-
-        let mut output_map: Map<i32> = Map::new(output_size, Some(999));
+        
+        // Initial domain (all possible values set)
+        // Take full set and shift off the amount of cells we need to be 32(bits) - max_domain
+        let initial_val = (!0u32) >> (32u32 - (constraints.len() as u32)/4);
+        let mut output_map: Map<i32> = Map::new(output_size, Some(initial_val as i32));
         
         // Allocate some memory for GPU-side buffers
         let mut dev_buffers: Vec<DeviceBuffer<i32>> = Vec::new();
@@ -97,7 +99,6 @@ impl CudaWavemap {
             }
         }
         dev_buffers[0].copy_from(&output_map.data[..]).unwrap();
-        (dev_buffers[0])[0..1].copy_from(&[4_i32]).unwrap();
         
         // changes_occured(_dev) track if any changes occur during propagation step
         let mut changes_occured_dev = DeviceBox::new(&0_i32).unwrap();
@@ -177,10 +178,7 @@ impl CudaWavemap {
 
         // Copy the final output back to the CPU
         dev_buffers[0].copy_to(&mut output_map.data).unwrap();
-        //println!("{}", output_map);
-        //println!("blocks: {}x{} threads.\nTotal threads: {}", 
-        //    blocks_needed, block_size, block_size*blocks_needed);
-        
+ 
         output_map
     }
 }
