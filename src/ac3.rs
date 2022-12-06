@@ -9,7 +9,7 @@ use std::{
 };
 use rand::seq::IteratorRandom;
 
-pub fn collapse_from_sample(sample: &Map<i32>, output_size: Vec2) -> Tilemap {
+pub fn collapse_from_sample(sample: &Map<i32>, output_size: Vec2) -> Option<Tilemap> {
     Ac3Wavemap::collapse_from_sample(sample, output_size)
 }
 
@@ -92,7 +92,7 @@ impl From<Ac3Wavemap> for Map<i32> {
 }
 // Implement helpers for wave function collapse maps
 impl Ac3Wavemap {
-    pub fn collapse_from_sample(sample: &Map<i32>, output_size: Vec2) -> Tilemap {
+    pub fn collapse_from_sample(sample: &Map<i32>, output_size: Vec2) -> Option<Tilemap> {
         // Create a set of constraints using the sample
         let constraints = Constraints::from(sample);
         
@@ -102,16 +102,17 @@ impl Ac3Wavemap {
         // Create a wavemap with each variable holding the full domain
         let mut domains = Ac3Wavemap(Map::new(output_size, Some(domain)));
 
-        while !domains.is_collapsed() {
+        // TODO: Handle backtracking
+        while !(match domains.is_collapsed() { Some(val) => val, None => return None }){
             let collapsed = domains.collapse_lowest();
             domains.propagate(collapsed, &constraints);
         }
-
-        domains.into()
+        
+        Some(domains.into())
     }
 
     /// Finds the lowest entropy cell and collapses domain into a single choice
-    pub fn collapse_lowest(&mut self) -> usize{
+    pub fn collapse_lowest(&mut self) -> usize {
         let cell_choice = self.least_entropy();
         let map = &mut self.0;
         // Extract all options in domain
@@ -133,8 +134,7 @@ impl Ac3Wavemap {
         // Find the lowest length, non-1, domain by folding the domains into the minimum value
         let lowest_entropy = map.data.iter()
             .fold(usize::MAX, |acc, cell| {
-                if cell.len() == 0 { panic!("Illegal state. Aborting collapse."); }
-                else if cell.len() != 1 { cell.len().min(acc) }
+                if cell.len() != 1 { cell.len().min(acc) }
                 else { acc }
             });
         // Note: if lowest_entropy is usize::MAX then the Wavemap was collapsed before calling
@@ -189,14 +189,13 @@ impl Ac3Wavemap {
     }
 
     /// Scans wavemap for an uncollapsed cell. Returns true if at least one cell isn't collapsed
-    pub fn is_collapsed(&self) -> bool {
+    pub fn is_collapsed(&self) -> Option<bool> {
         for cell in self.0.data.iter() {
-            if cell.len() > 1 {
-                return false;
-            }
+            if cell.is_empty() { return None; }
+            if cell.len() > 1 { return Some(false); }
         }
 
-        true
+        Some(true)
     }
 }
 

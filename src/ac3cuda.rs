@@ -13,7 +13,7 @@ use std::collections::HashSet;
 
 use crate::datatype::{Vec2, Map, Tilemap};
 
-pub fn collapse_from_sample(sample: &Map<i32>, output_size: Vec2) -> Tilemap {
+pub fn collapse_from_sample(sample: &Map<i32>, output_size: Vec2) -> Option<Tilemap> {
     CudaWavemap::collapse_from_sample(sample, output_size)
 }
 
@@ -57,13 +57,12 @@ impl From<&Tilemap> for Constraints {
                 }
             }
         }
-        println!("{}", constraints);
         constraints
     }
 }
 struct CudaWavemap(Map<i32>);
 impl CudaWavemap {
-    fn collapse_from_sample(sample: &Map<i32>, output_size: Vec2) -> Map<i32> {
+    fn collapse_from_sample(sample: &Map<i32>, output_size: Vec2) -> Option<Map<i32>> {
     
         let block_size = 512;
         let dims = (output_size.x as u32, output_size.y as u32);
@@ -138,7 +137,7 @@ impl CudaWavemap {
             if max_cell == 1 { break; }
 
             // TODO: backtracking
-            else if max_cell == 0 { panic!("Invalid state reached.. exiting."); }
+            else if min_cell == 0 { return None; }
 
             // Find all cells matching min_cell
             let selected_cell;
@@ -179,7 +178,7 @@ impl CudaWavemap {
         // Copy the final output back to the CPU
         dev_buffers[0].copy_to(&mut output_map.data).unwrap();
  
-        output_map
+        Some(output_map)
     }
 }
 
@@ -190,7 +189,7 @@ impl CudaWavemap {
  * shared access to global memory As such, this will perform slower when there
  * are a large number of elements matching `value`. 
  * 
- * Worst case is size/block_size atomic writes, a single atomic write. In general
+ * Worst case is `size/block_size` atomic writes, a single atomic write. In general
  * this will underperform compared to sequential implementations for large datasets
  * due to poor memory utilization (random access vs sequential).
  */

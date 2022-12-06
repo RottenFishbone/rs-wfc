@@ -33,6 +33,7 @@ impl Display for Mode {
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
 struct Args {
+    /// Path to input sample
     sample: String,
     
     /// The width of the output
@@ -43,11 +44,17 @@ struct Args {
     #[clap(short='H', long, default_value_t = 32)]
     height: u32,
 
+    /// Algorithm to perform WFC with
     #[clap(short='m', default_value_t = Mode::Ac3)]
     mode: Mode,
 
+    /// Filename to output final result into.
     #[clap(short='o', default_value_t = String::from("wfc_out"))]
     output: String,
+
+    /// Abort the collapse when an invalid state is reached.
+    #[clap(short='A', default_value_t = false)]
+    abort_on_fail: bool
 }
 
 fn main() {
@@ -61,11 +68,20 @@ fn main() {
     let mut converter = UnicodeConverter::new();
     let sample = converter.build_sample(&sample_path).unwrap();
     
-    let output: Tilemap = match args.mode {
-        Mode::Ac3 => ac3::collapse_from_sample(&sample, output_size),
-        Mode::Ac3Cuda => ac3cuda::collapse_from_sample(&sample, output_size),
+    let mut output: Option<Tilemap>;
+    loop {
+        output = match args.mode {
+            Mode::Ac3 => ac3::collapse_from_sample(&sample, output_size),
+            Mode::Ac3Cuda => ac3cuda::collapse_from_sample(&sample, output_size),
+        };
+
+        if output.is_some() || args.abort_on_fail { break; }
+    }
+    
+    let output = match output {
+        Some(val) => val,
+        None => { eprintln!("Aborted on invalid state."); panic!();},
     };
-    println!("{}", sample);
     
     converter.output_map(&output, &std::path::PathBuf::from(args.output)).unwrap();
 }
