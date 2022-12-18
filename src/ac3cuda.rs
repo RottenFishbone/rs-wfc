@@ -17,6 +17,7 @@ pub fn collapse_from_sample(sample: &Map<i32>, output_size: Vec2) -> Option<Tile
     CudaWavemap::collapse_from_sample(sample, output_size)
 }
 
+
 struct Constraints(Vec<[i32; 4]>);
 // Implement pretty printing for Constraints
 impl Display for Constraints {
@@ -63,11 +64,8 @@ impl From<&Tilemap> for Constraints {
 struct CudaWavemap(Map<i32>);
 impl CudaWavemap {
     fn collapse_from_sample(sample: &Map<i32>, output_size: Vec2) -> Option<Map<i32>> {
-    
-        let block_size = 512;
         let dims = (output_size.x as u32, output_size.y as u32);
         let size = dims.0 * dims.1;
-        let blocks_needed = (size+block_size-1)/block_size;
  
         // Init CUDA/RustaCUDA
         rustacuda::init(CudaFlags::empty()).unwrap();
@@ -90,34 +88,44 @@ impl CudaWavemap {
         let initial_val = (!0u32) >> (32u32 - (constraints.len() as u32)/4);
         let mut output_map: Map<i32> = Map::new(output_size, Some(initial_val as i32));
         
-        // Allocate some memory for GPU-side buffers
-        let mut dev_buffers: Vec<DeviceBuffer<i32>> = Vec::new();
-        for _ in 0..3 {
-            unsafe{ 
-                dev_buffers.push(DeviceBuffer::uninitialized(size as usize).unwrap());
-            }
+        // Allocate memory on GPU
+        let (mut cache_buffer, mut cell_buffer, mut counts_buffer, mut min_cells_buffer);
+        unsafe {
+            // Holds cell domain bitsets
+            cell_buffer = DeviceBuffer::uninitialized(size as usize).unwrap();
+            // Caches arc-consistent states
+            cache_buffer = DeviceBuffer::uninitialized(size as usize).unwrap();
+            // Holds counts of remaining bits per cell
+            counts_buffer = DeviceBuffer::uninitialized(size as usize).unwrap();
+            // Holds list of cells with lowest entropy (held on GPU)
+            min_cells_buffer = DeviceBuffer::uninitialized(size as usize).unwrap();
         }
-        dev_buffers[0].copy_from(&output_map.data[..]).unwrap();
+        // Clone uncollapsed states to GPU
+        cell_buffer.copy_from(&output_map.data[..]).unwrap();
+        cache_buffer.copy_from(&cell_buffer).unwrap();
         
         // changes_occured(_dev) track if any changes occur during propagation step
         let mut changes_occured_dev = DeviceBox::new(&0_i32).unwrap();
         let mut rng = rand::thread_rng();
-        // Iterate until max_cell
+        
+        // Holds the untested list of bits for selected cell
+        let mut bit_set = HashSet::<i32>::new();
+        let mut selected_cell_id = 0;
+
+        // Iterate until max_cell == 1 (all cells hold a single value) or min_cell == 0
         loop {
+            
             let mut changes_occured: i32 = 1;
             while changes_occured != 0 {
                 // Default the device state to 'no changes have occured (yet)'
                 changes_occured_dev.copy_from(&0_i32).unwrap();
-
+                
                 // Run a single iteration of parallel AC3
                 unsafe { 
-                    launch!(
-                        module.iterate_ac<<<blocks_needed, block_size, 0, stream>>>(
-                            dev_buffers[0].as_device_ptr(),
-                            constraints_dev.as_device_ptr(),
-                            output_map.size.x, output_map.size.y,
-                            changes_occured_dev.as_device_ptr()
-                        )
+                    parallel_propagate(output_size, &module, &stream,
+                        cell_buffer.as_device_ptr(),
+                        constraints_dev.as_device_ptr(),
+                        changes_occured_dev.as_device_ptr()
                     ).unwrap();
                 }
                 stream.synchronize().unwrap();
@@ -125,79 +133,130 @@ impl CudaWavemap {
                 changes_occured_dev.copy_to(&mut changes_occured).unwrap();
             }
 
-            // Calculate the upper and lower bounds of all domains (excluding 1s for min)
+            // Calculate the upper and lower bounds of all domains (excluding 1's for min)
             let (min_cell, max_cell);
             unsafe {
                 (min_cell, max_cell) = parallel_bounds(
                     size, &module, &stream, 
-                    dev_buffers[0].as_device_ptr(),
-                    dev_buffers[1].as_device_ptr()
+                    cell_buffer.as_device_ptr(),
+                    counts_buffer.as_device_ptr()
                 ).unwrap();
             }
-            if max_cell == 1 { break; }
-
-            // TODO: backtracking
-            else if min_cell == 0 { return None; }
-
-            // Find all cells matching min_cell
-            let selected_cell;
-            unsafe {
-                selected_cell = parallel_random_match(min_cell, size, 
-                    &module, &stream,
-                    dev_buffers[1].as_device_ptr(),
-                    &mut dev_buffers[2]).unwrap();
+            
+            if max_cell == 1 { 
+                // We are in an arc-consistent, collapsed state (yay)
+                break; 
             }
-
-            //Collapse selected cell
-            let mut selected_cell_container: Vec<i32> = vec![0];
-            let cell_range = (selected_cell as usize)..((selected_cell + 1) as usize);
-            (dev_buffers[0])[cell_range.clone()].copy_to(&mut selected_cell_container).unwrap();
-            let mut selected_cell_val = selected_cell_container[0];
-            let selected_cell_bits = {
-                let mut bit_vec = Vec::<i32>::new();
-                let mut i = 0;
-                while selected_cell_val > 0 {
-                    if (selected_cell_val & 1) == 1 { bit_vec.push(i); }
-                    selected_cell_val>>=1;
-                    i+=1;
+            else if min_cell == 0 { 
+                // We hit an invalid cell state
+                
+                if bit_set.is_empty() {
+                    // Simple backtracking is no longer possible
+                    return None;
                 }
-
-                bit_vec
-            };
-            selected_cell_val = *selected_cell_bits.choose(&mut rng).unwrap();
-            selected_cell_val = 1<<selected_cell_val;
-            (dev_buffers[0])[cell_range].copy_from(&[selected_cell_val]).unwrap();
+                
+                // Revert the cell_buffer to cached state
+                cell_buffer.copy_from(&cache_buffer).unwrap();
+            }
+            else {
+                // We are in an arc-consistent, uncollapsed state.
+                
+                // Cache the arc-consistent cell state before collapse
+                cache_buffer.copy_from(&cell_buffer).unwrap();
+                
+                // Find all cells matching min_cell
+                unsafe {
+                    let num_choices = parallel_match_cells(min_cell, size, 
+                        &module, &stream,
+                        counts_buffer.as_device_ptr(),
+                        &mut min_cells_buffer).unwrap();
+                    
+                    // Create a list of choices (done to allow for implementation of more adv
+                    // backtracking
+                    let cell_choices: Vec<i32> = (0..num_choices).map(|i| i as i32).collect();
+                    // Select one from the list
+                    let rand_id = *(cell_choices.iter().choose(&mut rng).unwrap()) as usize;
+                    // Grab the selected id from the list of matching cells
+                    let mut selected_cell_container = [0];
+                    min_cells_buffer[rand_id..(rand_id+1)].copy_to(&mut selected_cell_container[..]).unwrap();
+                    selected_cell_id = selected_cell_container[0];
+                    // Grab the actual cell from the cell buffer (converted to a hashset of bits)
+                    bit_set = get_bit_set(&cell_buffer, selected_cell_id);
+                }    
+            }
+            
+            // Pop a possible bit from the set and try collapsing it
+            let chosen_bit = bit_set.iter().choose(&mut rng).unwrap().clone();
+            bit_set.remove(&chosen_bit);
+            // Push the collapsed value to cell buffer
+            let target_range = (selected_cell_id as usize)..=(selected_cell_id as usize);
+            cell_buffer[target_range].copy_from(&[1<<chosen_bit]).unwrap();
         }
-        
+
         unsafe {
             // Convert all the bitfields into their index value
             parallel_convert_bitfields(size, &module, &stream, 
-                dev_buffers[0].as_device_ptr()).unwrap();
+                cell_buffer.as_device_ptr()).unwrap();
         }
 
         // Copy the final output back to the CPU
-        dev_buffers[0].copy_to(&mut output_map.data).unwrap();
- 
+        cell_buffer.copy_to(&mut output_map.data).unwrap();
         Some(output_map)
     }
 }
 
+fn get_bit_set(buffer: &DeviceBuffer<i32>, selected_cell_id: i32) -> HashSet<i32> {
+    // Hacky way to copy single value into a container using ranges
+    // Copy cell value from device into selected_cell_container at index 0
+    let mut selected_cell_container: Vec<i32> = vec![0];
+    let cell_range = (selected_cell_id as usize)..(selected_cell_id+1) as usize;
+    buffer[cell_range.clone()].copy_to(&mut selected_cell_container).unwrap();
+    // Unwrap the container into a single integer val
+    let mut selected_cell_val = selected_cell_container[0];
+
+    // Break the integer into a vec of _set_ bit value (indicies)
+    let mut bit_set = HashSet::<i32>::new();
+    let mut i = 0;
+    while selected_cell_val > 0 {
+        if (selected_cell_val & 1) == 1 { bit_set.insert(i); }
+        selected_cell_val>>=1;
+        i+=1;
+    }
+
+    bit_set
+}
+
 /**
- * Collects an array of indicies that correspond to cells matching `value`.
- *
- * This is performed by all cells at the same time, however, they require
- * shared access to global memory As such, this will perform slower when there
- * are a large number of elements matching `value`. 
- * 
- * Worst case is `size/block_size` atomic writes, a single atomic write. In general
- * this will underperform compared to sequential implementations for large datasets
- * due to poor memory utilization (random access vs sequential).
+ * Performs a single iteration of AC3 on the GPU.
  */
-unsafe fn parallel_random_match( value: i32, size: u32,
+unsafe fn parallel_propagate(size: Vec2,
+    module: &Module, stream: &Stream,
+    cell_buffer: DevicePointer<i32>, constraint_buffer: DevicePointer<i32>, changed: DevicePointer<i32> )
+    -> Result<(), CudaError> {
+ 
+        let block_size = 512;
+        let blocks_needed = ((size.x*size.y)+block_size-1)/block_size;
+        launch!(
+            module.iterate_ac<<<blocks_needed as u32, block_size as u32, 0, stream>>>(
+                cell_buffer,
+                constraint_buffer,
+                size.x, size.y,
+                changed
+            )
+        )?;
+
+        Ok(())
+}
+
+/**
+ * Matches all cells within the input buffer equaling `value`
+ * The results are stored into the results_buffer and its length is returned.
+ */
+unsafe fn parallel_match_cells( value: i32, size: u32,
     module: &Module, stream: &Stream,
     input_buffer: DevicePointer<i32>,
     results_buffer: &mut DeviceBuffer<i32>)
-    -> Result<i32, CudaError> {
+    -> Result<u32, CudaError> {
     
         let block_size = 512;
         let blocks_needed = (size+block_size-1)/block_size;
@@ -209,11 +268,7 @@ unsafe fn parallel_random_match( value: i32, size: u32,
              result_count.as_unified_ptr()))?;
         stream.synchronize()?;
         
-        let rand_id = rand::thread_rng().gen_range(0..(*result_count as u32)) as usize;
-        let mut selected_value = [0];
-        results_buffer[rand_id..(rand_id+1)].copy_to(&mut selected_value[..])?;
-
-        Ok(selected_value[0])
+        Ok(*result_count)
 }
 
 /**
@@ -291,6 +346,14 @@ unsafe fn parallel_bounds(size: u32,
         Ok((final_result & 0xFFFF, final_result >> 16))
 }
 
+/**
+ * Uses the GPU to convert all the collapsed bitfields into the actual
+ * index they represesnt.
+ *
+ * This can be used to convert from the CUDA-compatible internal representation
+ * of domains into our regular internal representation, which is a Map of integers
+ * each representing the content-index of the cell.
+ */
 unsafe fn parallel_convert_bitfields(size: u32, 
     module: &Module, stream: &Stream,
     buffer: DevicePointer<i32>)

@@ -40,10 +40,9 @@ void bitfield_to_id(uint32_t *bitfields, uint32_t length){
     @return Complete set of allowed values for domain in direction `dir`
  */
 extern "C" 
-__device__ 
-inline
-int findConstraints(int32_t *cell, int32_t *constraints, Direction dir) {
-    if (!(*cell)) { return 0; }
+inline __device__ 
+int findConstraints(int32_t cell, int32_t *constraints, Direction dir) {
+    if (!cell) { return 0; }
 
     int validDomain, offset, i;
     
@@ -51,7 +50,7 @@ int findConstraints(int32_t *cell, int32_t *constraints, Direction dir) {
     // By extension, `i` also represents the tile id we are concerned with
     // Note: __ffs is used to provide hardware level integer intrinsics
     // and brings the count from worst case 31 asted ops to 0 wasted ops (per call)
-    i = __ffs(*cell)-1;
+    i = __ffs(cell)-1;
     // `validDomain` is the domain the cell in direction `dir` is allowed to be
     validDomain = 0;
     do {
@@ -61,7 +60,7 @@ int findConstraints(int32_t *cell, int32_t *constraints, Direction dir) {
         validDomain |= constraints[i*NUM_DIRS + dir];
         
         // Find the distance to the next set bit
-        offset = __ffs((*cell) >> (i+1));
+        offset = __ffs(cell >> (i+1));
         i += offset;
         
         // Repeat if there is a next set bit
@@ -70,6 +69,21 @@ int findConstraints(int32_t *cell, int32_t *constraints, Direction dir) {
     return validDomain;
 }
 
+/**
+    @brief Perform a single step of AC3 propagation (in parallel)
+
+    Constrains each cell using its neighbours imposed constraints.
+    Note, that another cell might complete before one another resulting
+    in a call to a different cell in a different step of propagation.
+    This is okay given that cells cannot reach invalid states, as propagation
+    will result in eventual consistency in subsequent calls.
+
+    @param domains The array of bitfields to act on.
+    @param constraints The set of all constraints.
+    @param width The width of the 2D map.
+    @param height The height of the 2D map.
+    @param changesOccured Set to 1 if _any_ cell is modified.
+  */
 extern "C" 
 __global__ 
 void iterate_ac(int32_t *domains, int32_t *constraints,
@@ -83,36 +97,36 @@ void iterate_ac(int32_t *domains, int32_t *constraints,
     int32_t y = (threadIdx.x + blockDim.x * blockIdx.x) / width; 
     if (x >= width || y >= height) { return; }
 
-    int32_t *domain = &domains[x+y*width];
-    int32_t origDomain = *domain;
+    int32_t domain = domains[x+y*width];
+    int32_t origDomain = domain;
     // Intersect the restricted domain of each neighbour
     if (x > 0) {
-        *domain &= findConstraints(
-                &domains[x-1 + y*width],
+        domain &= findConstraints(
+                domains[x-1 + y*width],
                 constraints,
                 RIGHT);   // Neighbour is left, relativeDir is right (3)
     }
     if (x < width-1){
-        *domain &= findConstraints(
-                &domains[x+1 + y*width],
+        domain &= findConstraints(
+                domains[x+1 + y*width],
                 constraints,
                 LEFT);
     }
     if (y > 0) {
-        *domain &= findConstraints(
-                &domains[x + (y-1)*width],
+        domain &= findConstraints(
+                domains[x + (y-1)*width],
                 constraints,
                 DOWN);
     }
     if (y < height-1) {
-        *domain &= findConstraints(
-                &domains[x + (y+1)*width],
+        domain &= findConstraints(
+                domains[x + (y+1)*width],
                 constraints,
                 UP);
     }
-
+    domains[x+y*width] = domain;
     // Set changesOccured return flag to 1 if the domain was altered
-    if (origDomain != *domain) { changed = 1; }
+    if (origDomain != domain) { changed = 1; }
 
     // Minimize memory access to global memory by only having 1 thread per
     // block attempt to set it
@@ -162,12 +176,15 @@ void count_domains(int32_t *domains, uint32_t *results, uint32_t length){
 }
 
 
+
 /**
   @brief Parallel reduction to find min/max values of the input array)
 
   This performs a modified parallel reduction from the one explained by 
   Nvidia engineer Mark Harris
     https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf
+  Interestingly, the warp unrolling optimization had no effect, as such it is
+  excluded.
     
   The results are stored into a single integer, the least significant 16-bits
   representing the min, the others the max.

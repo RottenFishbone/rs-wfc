@@ -1,5 +1,4 @@
-#[macro_use]
-extern crate rustacuda;
+#[macro_use] extern crate rustacuda;
 
 mod ac3;
 mod ac3cuda;
@@ -74,8 +73,9 @@ fn main() {
             Mode::Ac3 => ac3::collapse_from_sample(&sample, output_size),
             Mode::Ac3Cuda => ac3cuda::collapse_from_sample(&sample, output_size),
         };
-
+        
         if output.is_some() || args.abort_on_fail { break; }
+        println!("Retrying...");
     }
     
     let output = match output {
@@ -84,4 +84,5 @@ fn main() {
     };
     
     converter.output_map(&output, &std::path::PathBuf::from(args.output)).unwrap();
+    println!("Done.");
 }
