@@ -33,14 +33,16 @@ Usage:
 ./wfc --help for detailed information
 
 Example:
-./wfc samples/sample_island.txt -W64 -H64 -m ac3-cuda
+./wfc samples/sample_islands.txt -W64 -H64 -m ac3-cuda
 Generates 64x64 unicode output to wfc_out using sample_island.txt as unicode sample source
 
 Visualization
 -------------
 Install Python 3 and the Pillow package
 Modify the variables at the top of utilities/img_converter.py to point to the correct files
+
 Within the utilities folder run
+
 ```
 python img_converter.python
 ```
