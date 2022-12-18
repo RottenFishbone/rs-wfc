@@ -1,0 +1,8 @@
+Beach tiles from OpenGameArt (https://opengameart.org/content/topdown-tileset)
+Credit to Clint Bellanger for original design, Daniel Stephens for rendering (CC-BY)
+
+Dirt Platformer Tiles from OpenGameArt (https://opengameart.org/content/dirt-platformer-tiles)
+Credit to Lanea Zimmerman (CC-BY)
+
+Pipes from OpenGameArt (https://opengameart.org/content/plums)
+Credit to surt (Public Domain)
