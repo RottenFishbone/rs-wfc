@@ -2,14 +2,22 @@ import os
 from PIL import Image
 
 # Location of sample file
+# Default options in ../samples/: sample_pipes.txt, sample_cliffs.txt, sample_islands.txt
 IN_SAMPLE = "../samples/sample_cliff.txt"
+
 # Location of output file from WFC
-IN_MAP = "../wfc_out/cliff.txt"
+# NOTE: By default the wfc program will output into ../wfc_out/
+# Demo options in demo/: cliffs.txt, islands.txt, islands_bigger.txt, pipes.txt
+IN_MAP = "demo/cliffs.txt"
+
 # Directory containing images.  
 # NOTE: images are assumed to be .png and must be named with their corresponding UTF-8 character
 # (with the exception of "." -> "_dot" and " " -> "_")
 IMG_DIR = "./images"
+
 # Directory to save resulting images
+# NOTE: By default this will overwrite each time
+# If you want to save multiple results you can move them to a different folder before running again
 OUT_DIR = "."
 
 def main():
