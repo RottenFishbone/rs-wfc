@@ -34,7 +34,7 @@ Usage:
 
 Example:
 ./wfc samples/sample_islands.txt -W64 -H64 -m ac3-cuda
-Generates 64x64 unicode output to wfc_out using sample_island.txt as unicode sample source
+Generates 64x64 unicode output to wfc_out using sample_islands.txt as unicode sample source
 
 Visualization
 -------------
